@@ -1,0 +1,11 @@
+# what all options can be given here can be found at:
+# https://doc.rust-lang.org/cargo/reference/config.html#configuration-format
+
+[build]
+target = "thumbv7em-none-eabihf"
+
+# more args can be found using: `ld --help` or `lld --help` since 
+# rust uses the llvm linker and llvm linker(`lld`) is compatible with GNU linker(`ld`)
+[target.thumbv7em-none-eabihf]
+rustflags = ["-C", "link-args=-T memory.ld"]
+
