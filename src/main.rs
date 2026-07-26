@@ -54,7 +54,7 @@ unsafe extern "C" {
     fn usart1();
     fn usart2();
     fn usart3();
-    fn exti15_10();
+    // fn exti15_10();
     fn stc_alarm();
     fn otg_fs_wkup();
     fn tim8_brk_tim12();
@@ -142,23 +142,53 @@ fn main() -> ! {
     // Step1: enable GPIO_A clock
     // why?: LD2 which is the only user-controlled LED on board is controlled by
     // PA5 pin which is inside GPIO_A port.
-    let dst = (constants::RCC_BASE + constants::RCC_AHB1ENR_OFFSET) as *mut u32;
-    utils::register_set_bit(dst, 0);
+    let rcc_ahb1enr = (constants::RCC_BASE + constants::RCC_AHB1ENR_OFFSET) as *mut u32;
+    utils::register_set_bit(rcc_ahb1enr, 0);
 
-    // Step2: set GPIO MODER register to output mode for PA5(because CPU would change the
+    // Step2: set GPIO_A MODER register to output mode for PA5(because CPU would change the
     // pin and make LED on)
-    let dst = (constants::GPIO_A_BASE + constants::GPIO_MODER_OFFSET) as *mut u32;
-    utils::register_write_bits(dst, 5 * 2, 2, 0b01);
+    let gpio_a_moder = (constants::GPIO_A_BASE + constants::GPIO_MODER_OFFSET) as *mut u32;
+    utils::register_write_bits(gpio_a_moder, 5 * 2, 2, 0b01);
 
     // Step3: OTYPER's reset state is push-pull so no need to change
 
     // Step4: OSPEEDR's reset state is low speed so no need to change
 
+    /**** button interrupt ****/
+    // enable GPIO_A clock
+    // why?: user button is controlled by PC13 pin which is inside GPIO_C port
+    utils::register_set_bit(rcc_ahb1enr, 2);
+
+    // enable SYSCNG clock
+    let addr = (constants::RCC_BASE + constants::RCC_APB2ENR_OFFSET) as *mut u32;
+    utils::register_set_bit(addr, 14);
+
+    // enable interrupt
+    utils::register_set_bit(constants::NVIC_ISER1_ADDR as *mut u32, 8);
+
+    // GPIO_C's MODER register bit is in input mode by default so no need to change
+
+    // GPIO_C's PUPD register set to PULL DOWN for pin 13
+    let gpio_c_moder = (constants::GPIO_C_BASE + constants::GPIO_PUPDR_OFFSET) as *mut u32;
+    utils::register_write_bits(gpio_c_moder, 13 * 2, 2, 0b10);
+
+    // EXTI_IMR enable
+    let addr = (constants::EXTI_BASE + constants::EXTI_IMR_OFFSET) as *mut u32;
+    utils::register_set_bit(addr, 13);
+
+    // EXTI_RTSR enable
+    let addr = (constants::EXTI_BASE + constants::EXTI_RTSR_OFFSET) as *mut u32;
+    utils::register_set_bit(addr, 13);
+
+    // SYSCFG_EXTICR4 to PC13 because PC 13 falls into EXTI4
+    let syscfg_exticr4 = (constants::SYSCFG_BASE + constants::SYSCFG_EXTICR4_OFFSET) as *mut u32;
+    utils::register_write_bits(syscfg_exticr4, 4, 4, 0b0010);
+
     #[allow(clippy::empty_loop)]
     loop {
         // Step5: busy wait and toggle the led
-        for _ in 0..100000 {}
-        toggle_led();
+        // for _ in 0..100000 {}
+        // toggle_led();
     }
 }
 
@@ -173,6 +203,13 @@ fn toggle_led() {
     } else {
         utils::register_write_val(bsrr_addr, 1u32 << 5);
     }
+}
+
+extern "C" fn exti15_10() {
+    toggle_led();
+
+    let addr = (constants::EXTI_BASE + constants::EXTI_PR_OFFSET) as *mut u32;
+    utils::register_set_bit(addr, 13);
 }
 
 #[panic_handler]
