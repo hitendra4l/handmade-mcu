@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+mod constants;
+mod utils;
+
 unsafe extern "C" {
     fn nmi();
     fn hard_fault();
@@ -136,19 +139,40 @@ extern "C" fn reset_handler() {
 }
 
 fn main() -> ! {
-    let a = 2;
-    let b = 10;
+    // Step1: enable GPIO_A clock
+    // why?: LD2 which is the only user-controlled LED on board is controlled by
+    // PA5 pin which is inside GPIO_A port.
+    let dst = (constants::RCC_BASE + constants::RCC_AHB1ENR_OFFSET) as *mut u32;
+    utils::register_set_bit(dst, 0);
 
-    let _c = add(a, b);
+    // Step2: set GPIO MODER register to output mode for PA5(because CPU would change the
+    // pin and make LED on)
+    let dst = (constants::GPIO_A_BASE + constants::GPIO_MODER_OFFSET) as *mut u32;
+    utils::register_write_bits(dst, 5 * 2, 2, 0b01);
+
+    // Step3: OTYPER's reset state is push-pull so no need to change
+
+    // Step4: OSPEEDR's reset state is low speed so no need to change
 
     #[allow(clippy::empty_loop)]
     loop {
-        // empty loop because on bare-metal we don't have anywhere to return
+        // Step5: busy wait and toggle the led
+        for _ in 0..100000 {}
+        toggle_led();
     }
 }
 
-fn add(x: i32, y: i32) -> i32 {
-    x + y
+fn toggle_led() {
+    let odr_addr = (constants::GPIO_A_BASE + constants::GPIO_ODR_OFFSET) as *mut u32;
+    let is_led_on = utils::read_register_bit(odr_addr, 5);
+
+    let bsrr_addr = (constants::GPIO_A_BASE + constants::GPIO_BSRR_OFFSET) as *mut u32;
+
+    if is_led_on {
+        utils::register_write_val(bsrr_addr, 1u32 << (5 + 16));
+    } else {
+        utils::register_write_val(bsrr_addr, 1u32 << 5);
+    }
 }
 
 #[panic_handler]
