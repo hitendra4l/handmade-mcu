@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 
+mod button;
 mod constants;
+mod led;
+mod systick;
 mod utils;
 
 unsafe extern "C" {
@@ -13,7 +16,6 @@ unsafe extern "C" {
     fn sv_call();
     fn debug_monitor();
     fn pend_sv();
-    fn systick();
     fn wwdg();
     fn pvd();
     fn tamp_stamp();
@@ -54,7 +56,6 @@ unsafe extern "C" {
     fn usart1();
     fn usart2();
     fn usart3();
-    // fn exti15_10();
     fn stc_alarm();
     fn otg_fs_wkup();
     fn tim8_brk_tim12();
@@ -102,127 +103,6 @@ unsafe extern "C" {
     fn fmpi2c1_error();
 }
 
-unsafe extern "C" {
-    static _start_data_in_ram: *mut u32;
-    static _end_data_in_ram: *const u32;
-    static _start_data: *const u32;
-    static _start_bss: *mut u32;
-    static _end_bss: *const u32;
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn reset_handler() {
-    // copy flash .data to ram
-    unsafe {
-        let mut flash_ptr = _start_data;
-        let mut ram_ptr = _start_data_in_ram;
-
-        while (ram_ptr as u32) < (_end_data_in_ram as u32) {
-            *ram_ptr = *flash_ptr;
-
-            flash_ptr = flash_ptr.add(1);
-            ram_ptr = ram_ptr.add(1);
-        }
-    }
-
-    // zero out the .bss section
-    unsafe {
-        let mut bss_ptr = _start_bss;
-
-        while (bss_ptr as u32) < (_end_bss as u32) {
-            *bss_ptr = 0;
-            bss_ptr = bss_ptr.add(1);
-        }
-    }
-
-    main();
-}
-
-fn main() -> ! {
-    // Step1: enable GPIO_A clock
-    // why?: LD2 which is the only user-controlled LED on board is controlled by
-    // PA5 pin which is inside GPIO_A port.
-    let rcc_ahb1enr = (constants::RCC_BASE + constants::RCC_AHB1ENR_OFFSET) as *mut u32;
-    utils::register_set_bit(rcc_ahb1enr, 0);
-
-    // Step2: set GPIO_A MODER register to output mode for PA5(because CPU would change the
-    // pin and make LED on)
-    let gpio_a_moder = (constants::GPIO_A_BASE + constants::GPIO_MODER_OFFSET) as *mut u32;
-    utils::register_write_bits(gpio_a_moder, 5 * 2, 2, 0b01);
-
-    // Step3: OTYPER's reset state is push-pull so no need to change
-
-    // Step4: OSPEEDR's reset state is low speed so no need to change
-
-    /**** button interrupt ****/
-    // enable GPIO_A clock
-    // why?: user button is controlled by PC13 pin which is inside GPIO_C port
-    utils::register_set_bit(rcc_ahb1enr, 2);
-
-    // enable SYSCNG clock
-    let addr = (constants::RCC_BASE + constants::RCC_APB2ENR_OFFSET) as *mut u32;
-    utils::register_set_bit(addr, 14);
-
-    // enable interrupt
-    utils::register_set_bit(constants::NVIC_ISER1_ADDR as *mut u32, 8);
-
-    // GPIO_C's MODER register bit is in input mode by default so no need to change
-
-    // GPIO_C's PUPD register set to PULL DOWN for pin 13
-    let gpio_c_moder = (constants::GPIO_C_BASE + constants::GPIO_PUPDR_OFFSET) as *mut u32;
-    utils::register_write_bits(gpio_c_moder, 13 * 2, 2, 0b10);
-
-    // EXTI_IMR enable
-    let addr = (constants::EXTI_BASE + constants::EXTI_IMR_OFFSET) as *mut u32;
-    utils::register_set_bit(addr, 13);
-
-    // EXTI_RTSR enable
-    let addr = (constants::EXTI_BASE + constants::EXTI_RTSR_OFFSET) as *mut u32;
-    utils::register_set_bit(addr, 13);
-
-    // SYSCFG_EXTICR4 to PC13 because PC 13 falls into EXTI4
-    let syscfg_exticr4 = (constants::SYSCFG_BASE + constants::SYSCFG_EXTICR4_OFFSET) as *mut u32;
-    utils::register_write_bits(syscfg_exticr4, 4, 4, 0b0010);
-
-    #[allow(clippy::empty_loop)]
-    loop {
-        // Step5: busy wait and toggle the led
-        // for _ in 0..100000 {}
-        // toggle_led();
-    }
-}
-
-fn toggle_led() {
-    let odr_addr = (constants::GPIO_A_BASE + constants::GPIO_ODR_OFFSET) as *mut u32;
-    let is_led_on = utils::read_register_bit(odr_addr, 5);
-
-    let bsrr_addr = (constants::GPIO_A_BASE + constants::GPIO_BSRR_OFFSET) as *mut u32;
-
-    if is_led_on {
-        utils::register_write_val(bsrr_addr, 1u32 << (5 + 16));
-    } else {
-        utils::register_write_val(bsrr_addr, 1u32 << 5);
-    }
-}
-
-extern "C" fn exti15_10() {
-    toggle_led();
-
-    let addr = (constants::EXTI_BASE + constants::EXTI_PR_OFFSET) as *mut u32;
-    utils::register_set_bit(addr, 13);
-}
-
-#[panic_handler]
-fn panic_handler(_panic_info: &core::panic::PanicInfo) -> ! {
-    loop {}
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn default_handler() {
-    #[allow(clippy::empty_loop)]
-    loop {}
-}
-
 #[used]
 #[unsafe(link_section = ".vector_table")]
 static VECTOR_TABLE: [Option<unsafe extern "C" fn()>; 112] = [
@@ -240,7 +120,7 @@ static VECTOR_TABLE: [Option<unsafe extern "C" fn()>; 112] = [
     Some(debug_monitor),
     None,
     Some(pend_sv),
-    Some(systick),
+    Some(systick::systick),
     Some(wwdg),
     Some(pvd),
     Some(tamp_stamp),
@@ -281,7 +161,7 @@ static VECTOR_TABLE: [Option<unsafe extern "C" fn()>; 112] = [
     Some(usart1),
     Some(usart2),
     Some(usart3),
-    Some(exti15_10),
+    Some(button::exti15_10),
     Some(stc_alarm),
     Some(otg_fs_wkup),
     Some(tim8_brk_tim12),
@@ -339,3 +219,60 @@ static VECTOR_TABLE: [Option<unsafe extern "C" fn()>; 112] = [
     Some(fmpi2c1),
     Some(fmpi2c1_error),
 ];
+
+unsafe extern "C" {
+    static _start_data_in_ram: u32;
+    static _end_data_in_ram: u32;
+    static _start_data: u32;
+    static _start_bss: u32;
+    static _end_bss: u32;
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn reset_handler() {
+    // copy flash .data to ram
+    unsafe {
+        let mut flash_ptr = &raw const _start_data;
+        let mut ram_ptr = &raw const _start_data_in_ram as *mut u32;
+        let end_ram = &raw const _end_data_in_ram;
+
+        while (ram_ptr as u32) < (end_ram as u32) {
+            *ram_ptr = *flash_ptr;
+            flash_ptr = flash_ptr.add(1);
+            ram_ptr = ram_ptr.add(1);
+        }
+    }
+
+    // zero out the .bss section
+    let mut bss_ptr = &raw const _start_bss as *mut u32;
+    let end_bss = &raw const _end_bss;
+
+    while (bss_ptr as u32) < (end_bss as u32) {
+        unsafe {
+            *bss_ptr = 0;
+            bss_ptr = bss_ptr.add(1);
+        }
+    }
+
+    main();
+}
+
+fn main() -> ! {
+    led::init();
+    button::init();
+    systick::init();
+
+    #[allow(clippy::empty_loop)]
+    loop {}
+}
+
+#[panic_handler]
+fn panic_handler(_panic_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn default_handler() {
+    #[allow(clippy::empty_loop)]
+    loop {}
+}

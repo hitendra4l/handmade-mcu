@@ -19,3 +19,7 @@ pub const EXTI_RTSR_OFFSET: u32 = 0x08;
 pub const EXTI_PR_OFFSET: u32 = 0x14;
 
 pub const NVIC_ISER1_ADDR: u32 = 0xE000E100 + 0x04;
+
+pub const STK_CTRL_ADDR: u32 = 0xE000E010;
+pub const STK_LOAD_ADDR: u32 = 0xE000E014;
+pub const STK_VAL_ADDR: u32 = 0xE000E018;
