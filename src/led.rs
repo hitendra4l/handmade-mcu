@@ -9,8 +9,8 @@ pub fn init() {
         0,
     );
 
-    // Step2: set GPIO_A MODER register to output mode for PA5(because CPU would change the
-    // pin and make LED on)
+    // Step2: set GPIO_A MODER register to output mode for PA5(because CPU would
+    // change the pin and make LED on)
     utils::register_write_bits(
         (constants::GPIO_A_BASE + constants::GPIO_MODER_OFFSET) as *mut u32,
         5 * 2,

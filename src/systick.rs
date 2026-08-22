@@ -2,10 +2,10 @@ use crate::{constants, led, utils};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub fn init() {
-    // max = 16_777_215 = 0x00FFFFFF;
-    // 2MHz * 2 = 2_000_000 * 2 = 4_000_000 => 2 seconds
-    // Set value in load register
-    utils::register_write_bits(constants::STK_LOAD_ADDR as *mut u32, 0, 24, 4_000_000);
+    let max = 0x00FFFFFF;
+    let systick = max / 8;
+    // Set value in load register => 2 seconds
+    utils::register_write_bits(constants::STK_LOAD_ADDR as *mut u32, 0, 24, systick * 2);
 
     // clear current value
     utils::register_write_bits(constants::STK_VAL_ADDR as *mut u32, 0, 32, 0);

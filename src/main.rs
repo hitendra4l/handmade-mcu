@@ -4,6 +4,7 @@
 mod button;
 mod constants;
 mod led;
+mod spi;
 mod systick;
 mod utils;
 
@@ -261,6 +262,7 @@ fn main() -> ! {
     led::init();
     button::init();
     systick::init();
+    spi::init();
 
     #[allow(clippy::empty_loop)]
     loop {}

@@ -13,6 +13,7 @@ pub fn register_set_bit(addr: *mut u32, bit_position: u8) {
     unsafe { write_volatile(addr, val | mask) };
 }
 
+/// this function does read-modify-write
 pub fn register_write_bits(addr: *mut u32, offset: u8, width: u8, value: u32) {
     debug_assert!(width > 0 && width <= 32 && offset + width <= 32);
 
