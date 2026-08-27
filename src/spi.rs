@@ -36,7 +36,7 @@ pub fn init() {
     // Bit[0] : CPHA => 0
     // Bit[1] : CPOL => 0
     // Bit[2] : MSTR => 1 (board is in master mode)
-    // Bit[5:3] : BR => 000 => (f_PCKL/1 => 8MHz)
+    // Bit[5:3] : BR => 000 => (f_PCKL/2 => 8MHz)
     //     RCC_CFGR register is in it's reset state which means
     //     System Clock is HSI => 16MHz
     //     AHB Prescaler => 1
@@ -191,8 +191,13 @@ fn init_display() {
     lcd_reset();
 
     lcd_write_command(LcdCommand::SWRESET, &[]);
+    // datasheet wants 5ms after a software reset, 120ms if the panel
+    // was in sleep-out mode when the reset was issued
+    systick::delay_ms(120);
 
     lcd_write_command(LcdCommand::SLEEPOUT, &[]);
+    // datasheet wants 120ms after sleep out before the next command
+    systick::delay_ms(120);
 
     // 16bit/pixel RGB565
     lcd_write_command(LcdCommand::PIXSET, &[0x55]);
@@ -202,17 +207,16 @@ fn init_display() {
 
     lcd_write_command(LcdCommand::DISPLAYON, &[]);
 
-    // clear_display();
     draw_on_display();
 }
 
 fn lcd_reset() {
     set_lcd_reset(PinStatus::High);
-    systick::delay_ms(1);
+    systick::delay_ms(2);
 
     // datasheet wants RESET held low for atleast 10us
     set_lcd_reset(PinStatus::Low);
-    systick::delay_ms(1);
+    systick::delay_ms(2);
 
     // atleast 120ms before the first command can be sent
     set_lcd_reset(PinStatus::High);
@@ -223,28 +227,38 @@ fn lcd_write_command(cmd: LcdCommand, params: &[u8]) {
     set_lcd_cs(PinStatus::Low);
     set_lcd_dc(PinStatus::Low);
 
-    spi_wait_available();
+    spi_wait_txe();
 
     let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
     utils::register_write_val_u8(spi_dr_addr, cmd as u8);
 
-    spi_wait_available();
+    spi_wait_idle();
 
     set_lcd_dc(PinStatus::High);
 
-    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
-    for &data in params {
-        while !get_spi_flag(SpiFlag::Txe) {}
-        utils::register_write_val_u8(spi_dr_addr, data);
-    }
+    if !params.is_empty() {
+        for &data in params {
+            spi_wait_txe();
+            utils::register_write_val_u8(spi_dr_addr, data);
+        }
 
-    spi_wait_available();
+        spi_wait_idle();
+    }
 
     set_lcd_cs(PinStatus::High);
 }
 
-fn spi_wait_available() {
+/// Wait until the TX buffer can accept another byte.
+/// This is all that is needed before writing to DR.
+fn spi_wait_txe() {
     while !get_spi_flag(SpiFlag::Txe) {}
+}
+
+/// Wait until the shift register has drained.
+/// Required before toggling CS or DC, otherwise the pin moves
+/// while a byte is still on the wire.
+fn spi_wait_idle() {
+    spi_wait_txe();
     while get_spi_flag(SpiFlag::Bsy) {}
 }
 
@@ -262,60 +276,26 @@ fn draw_on_display() {
     set_lcd_cs(PinStatus::Low);
     set_lcd_dc(PinStatus::Low);
 
-    spi_wait_available();
+    spi_wait_txe();
 
     let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
     utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
 
-    spi_wait_available();
+    spi_wait_idle();
 
     set_lcd_dc(PinStatus::High);
 
-    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
     for j in 0..LCD_HEIGHT as i32 {
         for i in 0..LCD_WIDTH as i32 {
-            while !get_spi_flag(SpiFlag::Txe) {}
-            let r = (i - 100i32) * (i - 100i32) + j * j;
-            // let r = i * i + j * j;
+            let r = i * i + j * j;
 
-            utils::register_write_val_u8(spi_dr_addr, if r < 5000 { high_byte } else { 0u8 });
-            while !get_spi_flag(SpiFlag::Txe) {}
-            utils::register_write_val_u8(spi_dr_addr, if r < 5000 { low_byte } else { 0u8 });
+            spi_wait_txe();
+            utils::register_write_val_u8(spi_dr_addr, if r < 10000 { high_byte } else { 0u8 });
+            spi_wait_txe();
+            utils::register_write_val_u8(spi_dr_addr, if r < 10000 { low_byte } else { 0u8 });
         }
     }
 
-    spi_wait_available();
+    spi_wait_idle();
     set_lcd_cs(PinStatus::High);
 }
-
-// fn clear_display() {
-//     // set address window
-//     let x_end = LCD_WIDTH - 1;
-//     let y_end = LCD_HEIGHT - 1;
-//     lcd_write_command(LcdCommand::CASET, &[0, 0, (x_end >> 8) as u8, x_end as u8]);
-//     lcd_write_command(LcdCommand::PASET, &[0, 0, (y_end >> 8) as u8, y_end as u8]);
-//
-//     set_lcd_cs(PinStatus::Low);
-//     set_lcd_dc(PinStatus::Low);
-//
-//     spi_wait_available();
-//
-//     let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
-//     utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
-//
-//     spi_wait_available();
-//
-//     set_lcd_dc(PinStatus::High);
-//
-//     let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
-//     for _ in 0..LCD_HEIGHT as i32 {
-//         for _ in 0..LCD_WIDTH as i32 {
-//             utils::register_write_val_u8(spi_dr_addr, 0u8);
-//             while !get_spi_flag(SpiFlag::Txe) {}
-//             utils::register_write_val_u8(spi_dr_addr, 0u8);
-//         }
-//     }
-//
-//     spi_wait_available();
-//     set_lcd_cs(PinStatus::High);
-// }
