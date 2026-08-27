@@ -1,31 +1,44 @@
-use crate::{constants, led, utils};
+use crate::{constants, utils};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+const HCLK_HZ: u32 = 16_000_000;
+
+/// milliseconds since `init()`, wraps after ~49 days
+static MILLIS: AtomicU32 = AtomicU32::new(0);
+
 pub fn init() {
-    let max = 0x00FFFFFF;
-    let systick = max / 8;
-    // Set value in load register => 2 seconds
-    utils::register_write_bits(constants::STK_LOAD_ADDR as *mut u32, 0, 24, systick * 2);
+    // CLKSOURCE is set to processor clock(16MHz) below, so 16000 ticks => 1ms.
+    // interrupt fires after LOAD+1 ticks, hence the -1
+    utils::register_write_bits(
+        constants::STK_LOAD_ADDR as *mut u32,
+        0,
+        24,
+        HCLK_HZ / 1000 - 1,
+    );
 
     // clear current value
-    utils::register_write_bits(constants::STK_VAL_ADDR as *mut u32, 0, 32, 0);
+    utils::register_write_val(constants::STK_VAL_ADDR as *mut u32, 0);
 
-    // enable systick
-    utils::register_write_bits(constants::STK_CTRL_ADDR as *mut u32, 0, 3, 0b011);
+    // Bit[0] : ENABLE => 1
+    // Bit[1] : TICKINT => 1 (interrupt on reload)
+    // Bit[2] : CLKSOURCE => 1 (processor clock, not HCLK/8)
+    utils::register_write_bits(constants::STK_CTRL_ADDR as *mut u32, 0, 3, 0b111);
 }
 
-pub fn disable() {
-    utils::register_write_bits(constants::STK_CTRL_ADDR as *mut u32, 0, 1, 0b0);
+fn now_ms() -> u32 {
+    MILLIS.load(Ordering::Relaxed)
 }
 
-static SYSTICK_COUNT: AtomicU32 = AtomicU32::new(0);
+/// blocking delay
+///
+/// spins on a counter only the systick interrupt advances, so this deadlocks if
+/// called with interrupts masked or from a handler at systick's priority or higher
+pub fn delay_ms(ms: u32) {
+    let start = now_ms();
+    // wrapping_sub keeps this correct across the MILLIS rollover
+    while now_ms().wrapping_sub(start) < ms {}
+}
 
 pub extern "C" fn systick() {
-    if SYSTICK_COUNT.load(Ordering::Relaxed) == 10 {
-        self::disable();
-        SYSTICK_COUNT.store(0, Ordering::Relaxed);
-    } else {
-        led::toggle_led();
-        SYSTICK_COUNT.fetch_add(1, Ordering::Relaxed);
-    }
+    MILLIS.fetch_add(1, Ordering::Relaxed);
 }
