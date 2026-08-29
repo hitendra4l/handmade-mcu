@@ -1,13 +1,13 @@
-use crate::{constants, utils};
+use crate::{clock::SYSCLK, constants, utils};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-const HCLK_HZ: u32 = 16_000_000;
+const HCLK_HZ: u32 = SYSCLK;
 
 /// milliseconds since `init()`, wraps after ~49 days
 static MILLIS: AtomicU32 = AtomicU32::new(0);
 
 pub fn init() {
-    // CLKSOURCE is set to processor clock(16MHz) below, so 16000 ticks => 1ms.
+    // CLKSOURCE is set to processor clock(180MHz) below, so 180000 ticks => 1ms.
     // interrupt fires after LOAD+1 ticks, hence the -1
     utils::register_write_bits(
         constants::STK_LOAD_ADDR as *mut u32,

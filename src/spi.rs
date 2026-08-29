@@ -1,10 +1,27 @@
 use crate::{
-    constants, systick,
+    constants,
+    systick::{self, delay_ms},
     utils::{self, register_write_val},
 };
 
 const LCD_WIDTH: u16 = 240;
 const LCD_HEIGHT: u16 = 320;
+
+enum Shape {
+    Circle,
+    SmallCircle1,
+    SmallCircle2,
+    Rect,
+}
+const CIRCLE_RADIUS: u16 = 100;
+const SMALL_CIRCLE_RADIUS: u16 = 60;
+const SQUARE_HALF: u16 = 70 / 2;
+
+const WIN_HALF: u16 = CIRCLE_RADIUS;
+const WIN_X_START: u16 = LCD_WIDTH / 2 - WIN_HALF;
+const WIN_X_END: u16 = LCD_WIDTH / 2 + WIN_HALF;
+const WIN_Y_START: u16 = LCD_HEIGHT / 2 - WIN_HALF;
+const WIN_Y_END: u16 = LCD_HEIGHT / 2 + WIN_HALF;
 
 #[repr(u8)]
 #[allow(clippy::upper_case_acronyms)]
@@ -36,12 +53,13 @@ pub fn init() {
     // Bit[0] : CPHA => 0
     // Bit[1] : CPOL => 0
     // Bit[2] : MSTR => 1 (board is in master mode)
-    // Bit[5:3] : BR => 000 => (f_PCKL/2 => 8MHz)
-    //     RCC_CFGR register is in it's reset state which means
-    //     System Clock is HSI => 16MHz
+    // Bit[5:3] : BR => 000 => (f_PCLK/4 => 45MHz)
+    //     clock::configure_sysclk() has already run by this point, so:
+    //     System Clock is PLL_P => 180MHz
     //     AHB Prescaler => 1
-    //     APB2 Prescaler => 1
-    //     f_PCLK => 16MHz
+    //     APB2 Prescaler => 2
+    //     f_PCLK => 90MHz
+    //     45MHz is out of spec's(10MHz) but works with short jumper wires
     // Bit[6] : SPE => 0 (SPI disabled, enable after setting config and AF)
     // Bit[7] : LSBFIRST => 0 (MSB First)
     // Bit[8] : SSI => 1 (NSS High)
@@ -207,7 +225,30 @@ fn init_display() {
 
     lcd_write_command(LcdCommand::DISPLAYON, &[]);
 
-    draw_on_display();
+    clear_screen();
+
+    let mut shape = Shape::Circle;
+    loop {
+        match shape {
+            Shape::Circle => {
+                draw_small_circle();
+                shape = Shape::SmallCircle1;
+            }
+            Shape::SmallCircle1 => {
+                draw_rectangle();
+                shape = Shape::Rect;
+            }
+            Shape::Rect => {
+                draw_small_circle();
+                shape = Shape::SmallCircle2;
+            }
+            Shape::SmallCircle2 => {
+                draw_circle();
+                shape = Shape::Circle;
+            }
+        }
+        delay_ms(100);
+    }
 }
 
 fn lcd_reset() {
@@ -262,12 +303,8 @@ fn spi_wait_idle() {
     while get_spi_flag(SpiFlag::Bsy) {}
 }
 
-fn draw_on_display() {
-    // set address window
-    let x_end = LCD_WIDTH - 1;
-    let y_end = LCD_HEIGHT - 1;
-    lcd_write_command(LcdCommand::CASET, &[0, 0, (x_end >> 8) as u8, x_end as u8]);
-    lcd_write_command(LcdCommand::PASET, &[0, 0, (y_end >> 8) as u8, y_end as u8]);
+fn draw_circle() {
+    set_address_window(WIN_X_START, WIN_X_END, WIN_Y_START, WIN_Y_END);
 
     // write to the display
     let high_byte = 0b1111_1000;
@@ -285,14 +322,148 @@ fn draw_on_display() {
 
     set_lcd_dc(PinStatus::High);
 
-    for j in 0..LCD_HEIGHT as i32 {
-        for i in 0..LCD_WIDTH as i32 {
-            let r = i * i + j * j;
+    let center_x = LCD_WIDTH as i32 / 2;
+    let center_y = LCD_HEIGHT as i32 / 2;
+    let radius_squared = CIRCLE_RADIUS as i32 * CIRCLE_RADIUS as i32;
+
+    for i in WIN_Y_START as i32..=WIN_Y_END as i32 {
+        for j in WIN_X_START as i32..=WIN_X_END as i32 {
+            let r = (i - center_y) * (i - center_y) + (j - center_x) * (j - center_x);
+            let in_shape = r < radius_squared;
 
             spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, if r < 10000 { high_byte } else { 0u8 });
+            utils::register_write_val_u8(spi_dr_addr, if in_shape { high_byte } else { 0u8 });
             spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, if r < 10000 { low_byte } else { 0u8 });
+            utils::register_write_val_u8(spi_dr_addr, if in_shape { low_byte } else { 0u8 });
+        }
+    }
+
+    spi_wait_idle();
+    set_lcd_cs(PinStatus::High);
+}
+
+fn draw_rectangle() {
+    set_address_window(WIN_X_START, WIN_X_END, WIN_Y_START, WIN_Y_END);
+
+    // write to the display
+    let high_byte = 0b1111_1000;
+    let low_byte = 0b0000_0000;
+
+    set_lcd_cs(PinStatus::Low);
+    set_lcd_dc(PinStatus::Low);
+
+    spi_wait_txe();
+
+    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
+    utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
+
+    spi_wait_idle();
+
+    set_lcd_dc(PinStatus::High);
+
+    let center_x = LCD_WIDTH as i32 / 2;
+    let center_y = LCD_HEIGHT as i32 / 2;
+    let half = SQUARE_HALF as i32;
+
+    for i in WIN_Y_START as i32..=WIN_Y_END as i32 {
+        for j in WIN_X_START as i32..=WIN_X_END as i32 {
+            let in_shape = (i > center_y - half)
+                && (i < center_y + half)
+                && (j > center_x - half)
+                && (j < center_x + half);
+
+            spi_wait_txe();
+            utils::register_write_val_u8(spi_dr_addr, if in_shape { high_byte } else { 0u8 });
+            spi_wait_txe();
+            utils::register_write_val_u8(spi_dr_addr, if in_shape { low_byte } else { 0u8 });
+        }
+    }
+
+    spi_wait_idle();
+    set_lcd_cs(PinStatus::High);
+}
+
+fn set_address_window(x_start: u16, x_end: u16, y_start: u16, y_end: u16) {
+    lcd_write_command(
+        LcdCommand::CASET,
+        &[
+            (x_start >> 8) as u8,
+            x_start as u8,
+            (x_end >> 8) as u8,
+            x_end as u8,
+        ],
+    );
+    lcd_write_command(
+        LcdCommand::PASET,
+        &[
+            (y_start >> 8) as u8,
+            y_start as u8,
+            (y_end >> 8) as u8,
+            y_end as u8,
+        ],
+    );
+}
+
+fn clear_screen() {
+    set_address_window(0, LCD_WIDTH - 1, 0, LCD_HEIGHT - 1);
+
+    set_lcd_cs(PinStatus::Low);
+    set_lcd_dc(PinStatus::Low);
+
+    spi_wait_txe();
+
+    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
+    utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
+
+    spi_wait_idle();
+
+    set_lcd_dc(PinStatus::High);
+
+    for _ in 0..LCD_HEIGHT as i32 {
+        for _ in 0..LCD_WIDTH as i32 {
+            spi_wait_txe();
+            utils::register_write_val_u8(spi_dr_addr, 0u8);
+            spi_wait_txe();
+            utils::register_write_val_u8(spi_dr_addr, 0u8);
+        }
+    }
+
+    spi_wait_idle();
+    set_lcd_cs(PinStatus::High);
+}
+
+fn draw_small_circle() {
+    set_address_window(WIN_X_START, WIN_X_END, WIN_Y_START, WIN_Y_END);
+
+    // write to the display
+    let high_byte = 0b1111_1000;
+    let low_byte = 0b0000_0000;
+
+    set_lcd_cs(PinStatus::Low);
+    set_lcd_dc(PinStatus::Low);
+
+    spi_wait_txe();
+
+    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
+    utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
+
+    spi_wait_idle();
+
+    set_lcd_dc(PinStatus::High);
+
+    let center_x = LCD_WIDTH as i32 / 2;
+    let center_y = LCD_HEIGHT as i32 / 2;
+    let radius_squared = SMALL_CIRCLE_RADIUS as i32 * SMALL_CIRCLE_RADIUS as i32;
+
+    for i in WIN_Y_START as i32..=WIN_Y_END as i32 {
+        for j in WIN_X_START as i32..=WIN_X_END as i32 {
+            let r = (i - center_y) * (i - center_y) + (j - center_x) * (j - center_x);
+            let in_shape = r < radius_squared;
+
+            spi_wait_txe();
+            utils::register_write_val_u8(spi_dr_addr, if in_shape { high_byte } else { 0u8 });
+            spi_wait_txe();
+            utils::register_write_val_u8(spi_dr_addr, if in_shape { low_byte } else { 0u8 });
         }
     }
 

@@ -2,6 +2,7 @@
 #![no_main]
 
 mod button;
+mod clock;
 mod constants;
 mod led;
 mod spi;
@@ -259,6 +260,7 @@ extern "C" fn reset_handler() {
 }
 
 fn main() -> ! {
+    clock::configure_sysclk();
     led::init();
     button::init();
     systick::init();

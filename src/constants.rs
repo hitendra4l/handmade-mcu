@@ -1,6 +1,17 @@
 pub const RCC_BASE: u32 = 0x4002_3800;
 pub const RCC_AHB1ENR_OFFSET: u32 = 0x30;
+pub const RCC_APB1ENR_OFFSET: u32 = 0x40;
 pub const RCC_APB2ENR_OFFSET: u32 = 0x44;
+pub const RCC_PLLCFGR_OFFSET: u32 = 0x04;
+pub const RCC_CFGR_OFFSET: u32 = 0x08;
+pub const RCC_CR_OFFSET: u32 = 0x00;
+
+pub const PWR_BASE: u32 = 0x4000_7000;
+pub const PWR_CR_OFFSET: u32 = 0x00;
+pub const PWR_CSR_OFFSET: u32 = 0x04;
+
+pub const FLASH_INTERFACE_BASE: u32 = 0x4002_3C00;
+pub const FLASH_INTERFACE_ACR_OFFSET: u32 = 0x00;
 
 pub const GPIO_A_BASE: u32 = 0x4002_0000;
 pub const GPIO_B_BASE: u32 = 0x4002_0400;
