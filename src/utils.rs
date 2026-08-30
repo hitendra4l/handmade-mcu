@@ -69,13 +69,19 @@ pub fn register_write_bits_u16(addr: *mut u16, offset: u8, width: u8, value: u16
     register_write_val_u16(addr, reg);
 }
 
-// pub fn read_register_u16(addr: *mut u16) -> u16 {
-//     unsafe { read_volatile(addr) }
-// }
+pub fn read_register_u16(addr: *mut u16) -> u16 {
+    unsafe { read_volatile(addr) }
+}
 
 pub fn read_register_bit_u16(addr: *mut u16, bit_position: u8) -> bool {
     let val = unsafe { read_volatile(addr) };
     (val & (1 << bit_position)) != 0
+}
+
+pub fn register_set_bit_u16(addr: *mut u16, bit_position: u8) {
+    let mask = 1u16 << bit_position;
+    let val = read_register_u16(addr);
+    unsafe { write_volatile(addr, val | mask) };
 }
 
 //-----------------------

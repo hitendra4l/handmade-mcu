@@ -4,6 +4,7 @@
 mod button;
 mod clock;
 mod constants;
+mod image_data;
 mod led;
 mod spi;
 mod systick;

@@ -40,5 +40,15 @@ pub const STK_VAL_ADDR: u32 = 0xE000E018;
 
 pub const SPI1_BASE_ADDR: u32 = 0x40013000;
 pub const SPI_CR1_OFFSET: u32 = 0x00;
+pub const SPI_CR2_OFFSET: u32 = 0x04;
 pub const SPI_SR_OFFSET: u32 = 0x08;
 pub const SPI_DR_OFFSET: u32 = 0x0C;
+
+pub const DMA2_BASE_ADDR: u32 = 0x4002_6400;
+pub const DMA_LISR_OFFSET: u32 = 0x00;
+pub const DMA_LIFCR_OFFSET: u32 = 0x08;
+pub const DMA_HIFCR_OFFSET: u32 = 0x0C;
+pub const DMA_S3CR_OFFSET: u32 = 0x58;
+pub const DMA_S3NDTR_OFFSET: u32 = 0x5C;
+pub const DMA_S3PAR_OFFSET: u32 = 0x60;
+pub const DMA_S3M0AR_OFFSET: u32 = 0x64;

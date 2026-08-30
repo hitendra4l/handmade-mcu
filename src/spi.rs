@@ -1,27 +1,39 @@
-use crate::{
-    constants,
-    systick::{self, delay_ms},
-    utils::{self, register_write_val},
+use crate::{constants, image_data, systick, utils};
+use core::{
+    ptr::addr_of_mut,
+    sync::atomic::{AtomicU8, Ordering},
 };
 
 const LCD_WIDTH: u16 = 240;
 const LCD_HEIGHT: u16 = 320;
 
-enum Shape {
-    Circle,
-    SmallCircle1,
-    SmallCircle2,
-    Rect,
-}
-const CIRCLE_RADIUS: u16 = 100;
-const SMALL_CIRCLE_RADIUS: u16 = 60;
-const SQUARE_HALF: u16 = 70 / 2;
+const DMA_ONE_TIME_ROWS: u32 = 20;
+const DMA_ONE_TIME_DATA: u32 = 2 * 240 * DMA_ONE_TIME_ROWS;
 
-const WIN_HALF: u16 = CIRCLE_RADIUS;
-const WIN_X_START: u16 = LCD_WIDTH / 2 - WIN_HALF;
-const WIN_X_END: u16 = LCD_WIDTH / 2 + WIN_HALF;
-const WIN_Y_START: u16 = LCD_HEIGHT / 2 - WIN_HALF;
-const WIN_Y_END: u16 = LCD_HEIGHT / 2 + WIN_HALF;
+static mut SPI_DMA_BUFFER: [u8; DMA_ONE_TIME_DATA as usize] = [0u8; DMA_ONE_TIME_DATA as usize];
+
+#[repr(u8)]
+enum DrawItem {
+    Circle = 0,
+    Image = 1,
+    Rectangle = 2,
+}
+static CURRENT_SHAPE: AtomicU8 = AtomicU8::new(0);
+
+impl DrawItem {
+    fn set_shape(shape: DrawItem) {
+        CURRENT_SHAPE.store(shape as u8, Ordering::Relaxed);
+    }
+
+    fn get_shape() -> Self {
+        match CURRENT_SHAPE.load(Ordering::Relaxed) {
+            0 => DrawItem::Circle,
+            1 => DrawItem::Image,
+            2 => DrawItem::Rectangle,
+            _ => unreachable!("invalid DrawItem"),
+        }
+    }
+}
 
 #[repr(u8)]
 #[allow(clippy::upper_case_acronyms)]
@@ -49,6 +61,7 @@ enum SpiFlag {
 
 pub fn init() {
     enable_apb2_spi1_peripheral();
+    configure_dma2();
 
     // Bit[0] : CPHA => 0
     // Bit[1] : CPOL => 0
@@ -72,6 +85,10 @@ pub fn init() {
     // Bit[15] : BIDIMODE => 1 (1 line bi-directional data mode)
     let spi_cr1_addr = (constants::SPI1_BASE_ADDR + constants::SPI_CR1_OFFSET) as *mut u16;
     utils::register_write_val_u16(spi_cr1_addr, 0b1100_0011_0000_0100);
+
+    // Bit[1] : (TXDMAEN) Tx buffer DMA enable
+    let spi_cr2_addr = (constants::SPI1_BASE_ADDR + constants::SPI_CR2_OFFSET) as *mut u16;
+    utils::register_set_bit_u16(spi_cr2_addr, 1);
 
     // Alternate Functions:
     //     PB3 => SPI1_SCK
@@ -177,8 +194,8 @@ fn set_lcd_dc(val: PinStatus) {
     let bsrr_address = (constants::GPIO_B_BASE + constants::GPIO_BSRR_OFFSET) as *mut u32;
 
     match val {
-        PinStatus::High => register_write_val(bsrr_address, 1u32 << 1),
-        PinStatus::Low => register_write_val(bsrr_address, 1u32 << (1 + 16)),
+        PinStatus::High => utils::register_write_val(bsrr_address, 1u32 << 1),
+        PinStatus::Low => utils::register_write_val(bsrr_address, 1u32 << (1 + 16)),
     }
 }
 
@@ -186,8 +203,8 @@ fn set_lcd_cs(val: PinStatus) {
     let bsrr_address = (constants::GPIO_B_BASE + constants::GPIO_BSRR_OFFSET) as *mut u32;
 
     match val {
-        PinStatus::High => register_write_val(bsrr_address, 1u32 << 0),
-        PinStatus::Low => register_write_val(bsrr_address, 1u32 << 16),
+        PinStatus::High => utils::register_write_val(bsrr_address, 1u32 << 0),
+        PinStatus::Low => utils::register_write_val(bsrr_address, 1u32 << 16),
     }
 }
 
@@ -195,8 +212,8 @@ fn set_lcd_reset(val: PinStatus) {
     let bsrr_address = (constants::GPIO_B_BASE + constants::GPIO_BSRR_OFFSET) as *mut u32;
 
     match val {
-        PinStatus::High => register_write_val(bsrr_address, 1u32 << 2),
-        PinStatus::Low => register_write_val(bsrr_address, 1u32 << (16 + 2)),
+        PinStatus::High => utils::register_write_val(bsrr_address, 1u32 << 2),
+        PinStatus::Low => utils::register_write_val(bsrr_address, 1u32 << (16 + 2)),
     }
 }
 
@@ -225,30 +242,7 @@ fn init_display() {
 
     lcd_write_command(LcdCommand::DISPLAYON, &[]);
 
-    clear_screen();
-
-    let mut shape = Shape::Circle;
-    loop {
-        match shape {
-            Shape::Circle => {
-                draw_small_circle();
-                shape = Shape::SmallCircle1;
-            }
-            Shape::SmallCircle1 => {
-                draw_rectangle();
-                shape = Shape::Rect;
-            }
-            Shape::Rect => {
-                draw_small_circle();
-                shape = Shape::SmallCircle2;
-            }
-            Shape::SmallCircle2 => {
-                draw_circle();
-                shape = Shape::Circle;
-            }
-        }
-        delay_ms(100);
-    }
+    draw(DrawItem::get_shape());
 }
 
 fn lcd_reset() {
@@ -303,86 +297,6 @@ fn spi_wait_idle() {
     while get_spi_flag(SpiFlag::Bsy) {}
 }
 
-fn draw_circle() {
-    set_address_window(WIN_X_START, WIN_X_END, WIN_Y_START, WIN_Y_END);
-
-    // write to the display
-    let high_byte = 0b1111_1000;
-    let low_byte = 0b0000_0000;
-
-    set_lcd_cs(PinStatus::Low);
-    set_lcd_dc(PinStatus::Low);
-
-    spi_wait_txe();
-
-    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
-    utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
-
-    spi_wait_idle();
-
-    set_lcd_dc(PinStatus::High);
-
-    let center_x = LCD_WIDTH as i32 / 2;
-    let center_y = LCD_HEIGHT as i32 / 2;
-    let radius_squared = CIRCLE_RADIUS as i32 * CIRCLE_RADIUS as i32;
-
-    for i in WIN_Y_START as i32..=WIN_Y_END as i32 {
-        for j in WIN_X_START as i32..=WIN_X_END as i32 {
-            let r = (i - center_y) * (i - center_y) + (j - center_x) * (j - center_x);
-            let in_shape = r < radius_squared;
-
-            spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, if in_shape { high_byte } else { 0u8 });
-            spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, if in_shape { low_byte } else { 0u8 });
-        }
-    }
-
-    spi_wait_idle();
-    set_lcd_cs(PinStatus::High);
-}
-
-fn draw_rectangle() {
-    set_address_window(WIN_X_START, WIN_X_END, WIN_Y_START, WIN_Y_END);
-
-    // write to the display
-    let high_byte = 0b1111_1000;
-    let low_byte = 0b0000_0000;
-
-    set_lcd_cs(PinStatus::Low);
-    set_lcd_dc(PinStatus::Low);
-
-    spi_wait_txe();
-
-    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
-    utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
-
-    spi_wait_idle();
-
-    set_lcd_dc(PinStatus::High);
-
-    let center_x = LCD_WIDTH as i32 / 2;
-    let center_y = LCD_HEIGHT as i32 / 2;
-    let half = SQUARE_HALF as i32;
-
-    for i in WIN_Y_START as i32..=WIN_Y_END as i32 {
-        for j in WIN_X_START as i32..=WIN_X_END as i32 {
-            let in_shape = (i > center_y - half)
-                && (i < center_y + half)
-                && (j > center_x - half)
-                && (j < center_x + half);
-
-            spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, if in_shape { high_byte } else { 0u8 });
-            spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, if in_shape { low_byte } else { 0u8 });
-        }
-    }
-
-    spi_wait_idle();
-    set_lcd_cs(PinStatus::High);
-}
-
 fn set_address_window(x_start: u16, x_end: u16, y_start: u16, y_end: u16) {
     lcd_write_command(
         LcdCommand::CASET,
@@ -404,7 +318,43 @@ fn set_address_window(x_start: u16, x_end: u16, y_start: u16, y_end: u16) {
     );
 }
 
-fn clear_screen() {
+fn configure_dma2() {
+    let rcc_ahb1enr_addr = (constants::RCC_BASE + constants::RCC_AHB1ENR_OFFSET) as *mut u32;
+    let dma2_s3cr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3CR_OFFSET) as *mut u32;
+    let dma2_s3ndtr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3NDTR_OFFSET) as *mut u32;
+    let dma2_s3par_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3PAR_OFFSET) as *mut u32;
+
+    utils::register_set_bit(rcc_ahb1enr_addr, 22);
+    utils::register_write_val(dma2_s3cr_addr, 0b0000_0110_0000_0011_0000_0100_0100_0000);
+    utils::register_write_val(dma2_s3ndtr_addr, DMA_ONE_TIME_DATA);
+    utils::register_write_val(
+        dma2_s3par_addr,
+        constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET,
+    );
+}
+
+fn dma2_send_data() {
+    let dma2_s3m0ar_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3M0AR_OFFSET) as *mut u32;
+    let dma2_lifcr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_LIFCR_OFFSET) as *mut u32;
+    let dma2_hifcr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_HIFCR_OFFSET) as *mut u32;
+    let dma2_s3cr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3CR_OFFSET) as *mut u32;
+    let dma2_lisr_adddr = (constants::DMA2_BASE_ADDR + constants::DMA_LISR_OFFSET) as *mut u32;
+
+    utils::register_write_val(dma2_s3m0ar_addr, addr_of_mut!(SPI_DMA_BUFFER) as u32);
+
+    while utils::read_register_bit(dma2_s3cr_addr, 0) {}
+
+    utils::register_write_val(dma2_lifcr_addr, 0b0000_1111_0111_1101_0000_1111_0111_1101);
+    utils::register_write_val(dma2_hifcr_addr, 0b0000_1111_0111_1101_0000_1111_0111_1101);
+    utils::register_set_bit(dma2_s3cr_addr, 0);
+
+    while !utils::read_register_bit(dma2_lisr_adddr, 27) {}
+
+    // disable DMA
+    utils::register_write_bits(dma2_s3cr_addr, 0, 1, 0);
+}
+
+fn draw(item: DrawItem) {
     set_address_window(0, LCD_WIDTH - 1, 0, LCD_HEIGHT - 1);
 
     set_lcd_cs(PinStatus::Low);
@@ -419,54 +369,106 @@ fn clear_screen() {
 
     set_lcd_dc(PinStatus::High);
 
-    for _ in 0..LCD_HEIGHT as i32 {
-        for _ in 0..LCD_WIDTH as i32 {
-            spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, 0u8);
-            spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, 0u8);
-        }
-    }
+    send_shape_data(item);
 
-    spi_wait_idle();
     set_lcd_cs(PinStatus::High);
 }
 
-fn draw_small_circle() {
-    set_address_window(WIN_X_START, WIN_X_END, WIN_Y_START, WIN_Y_END);
+fn send_shape_data(item: DrawItem) {
+    match item {
+        DrawItem::Circle => {
+            let mut y = 0;
+            let high_byte = 0b1111_1000;
+            let low_byte = 0b0000_0000;
 
-    // write to the display
-    let high_byte = 0b1111_1000;
-    let low_byte = 0b0000_0000;
+            for _ in 0..16 {
+                let mut idx = 0;
+                for _ in 0..DMA_ONE_TIME_ROWS {
+                    for i in 0..LCD_WIDTH as i32 {
+                        let x = i;
+                        let r = (x - (LCD_WIDTH as i32 / 2)) * (x - (LCD_WIDTH as i32 / 2))
+                            + (y - (LCD_HEIGHT as i32 / 2)) * (y - (LCD_HEIGHT as i32 / 2));
+                        unsafe {
+                            SPI_DMA_BUFFER[idx] = if r < 10000 { high_byte } else { 0u8 };
+                            SPI_DMA_BUFFER[idx + 1] = if r < 10000 { low_byte } else { 0u8 };
+                        }
+                        idx += 2;
+                    }
+                    y += 1;
+                }
 
-    set_lcd_cs(PinStatus::Low);
-    set_lcd_dc(PinStatus::Low);
+                dma2_send_data();
+                spi_wait_idle();
+            }
+        }
+        DrawItem::Image => {
+            let mut img_idx = 0;
+            for _ in 0..16 {
+                let mut idx = 0;
+                for _ in 0..DMA_ONE_TIME_ROWS {
+                    for _ in 0..LCD_WIDTH as i32 {
+                        // write to the display
+                        let high_byte = image_data::IMAGE_DATA[img_idx];
+                        let low_byte = image_data::IMAGE_DATA[img_idx + 1];
 
-    spi_wait_txe();
+                        unsafe {
+                            SPI_DMA_BUFFER[idx] = high_byte;
+                            SPI_DMA_BUFFER[idx + 1] = low_byte;
+                        }
+                        img_idx += 2;
+                        idx += 2;
+                    }
+                }
 
-    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
-    utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
+                dma2_send_data();
+                spi_wait_idle();
+            }
+        }
+        DrawItem::Rectangle => {
+            let mut y = 0;
+            let high_byte = 0b1111_1000;
+            let low_byte = 0b0000_0000;
 
-    spi_wait_idle();
+            for _ in 0..16 {
+                let mut idx = 0;
+                for _ in 0..DMA_ONE_TIME_ROWS {
+                    for i in 0..LCD_WIDTH as i32 {
+                        let x = i;
+                        let in_shape = x > 50
+                            && (x < (LCD_WIDTH as i32 - 50))
+                            && y > 100
+                            && (y < (LCD_HEIGHT as i32 - 100));
 
-    set_lcd_dc(PinStatus::High);
+                        unsafe {
+                            SPI_DMA_BUFFER[idx] = if in_shape { high_byte } else { 0u8 };
+                            SPI_DMA_BUFFER[idx + 1] = if in_shape { low_byte } else { 0u8 };
+                        }
+                        idx += 2;
+                    }
+                    y += 1;
+                }
 
-    let center_x = LCD_WIDTH as i32 / 2;
-    let center_y = LCD_HEIGHT as i32 / 2;
-    let radius_squared = SMALL_CIRCLE_RADIUS as i32 * SMALL_CIRCLE_RADIUS as i32;
-
-    for i in WIN_Y_START as i32..=WIN_Y_END as i32 {
-        for j in WIN_X_START as i32..=WIN_X_END as i32 {
-            let r = (i - center_y) * (i - center_y) + (j - center_x) * (j - center_x);
-            let in_shape = r < radius_squared;
-
-            spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, if in_shape { high_byte } else { 0u8 });
-            spi_wait_txe();
-            utils::register_write_val_u8(spi_dr_addr, if in_shape { low_byte } else { 0u8 });
+                dma2_send_data();
+                spi_wait_idle();
+            }
         }
     }
+}
 
-    spi_wait_idle();
-    set_lcd_cs(PinStatus::High);
+pub fn draw_next_shape() {
+    let current_shape = DrawItem::get_shape();
+    match current_shape {
+        DrawItem::Circle => {
+            draw(DrawItem::Image);
+            DrawItem::set_shape(DrawItem::Image);
+        }
+        DrawItem::Image => {
+            draw(DrawItem::Rectangle);
+            DrawItem::set_shape(DrawItem::Rectangle);
+        }
+        DrawItem::Rectangle => {
+            draw(DrawItem::Circle);
+            DrawItem::set_shape(DrawItem::Circle);
+        }
+    }
 }

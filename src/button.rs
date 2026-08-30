@@ -1,4 +1,4 @@
-use crate::{constants, led, utils};
+use crate::{constants, led, spi, utils};
 
 pub fn init() {
     // enable GPIO_C clock
@@ -49,6 +49,7 @@ pub fn init() {
 
 pub extern "C" fn exti15_10() {
     led::toggle_led();
+    spi::draw_next_shape();
 
     let addr = (constants::EXTI_BASE + constants::EXTI_PR_OFFSET) as *mut u32;
     utils::register_set_bit(addr, 13);
