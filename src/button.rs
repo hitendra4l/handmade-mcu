@@ -1,4 +1,4 @@
-use crate::{constants, led, spi, utils};
+use crate::{constants, led, spi::DrawItem, utils};
 
 pub fn init() {
     // enable GPIO_C clock
@@ -38,7 +38,7 @@ pub fn init() {
         13,
     );
 
-    // SYSCFG_EXTICR4 to PC13 because PC 13 falls into EXTI4
+    // SYSCFG_EXTICR4 bits[7:4] select port C for EXTI13, since EXTICR4 holds EXTI12-15
     utils::register_write_bits(
         (constants::SYSCFG_BASE + constants::SYSCFG_EXTICR4_OFFSET) as *mut u32,
         4,
@@ -48,9 +48,16 @@ pub fn init() {
 }
 
 pub extern "C" fn exti15_10() {
-    led::toggle_led();
-    spi::draw_next_shape();
-
     let addr = (constants::EXTI_BASE + constants::EXTI_PR_OFFSET) as *mut u32;
-    utils::register_set_bit(addr, 13);
+    utils::register_write_val(addr, 1 << 13);
+
+    led::toggle_led();
+
+    let current_shape = DrawItem::get_shape();
+    match current_shape {
+        DrawItem::Circle => DrawItem::set_shape(DrawItem::Image),
+        DrawItem::Image => DrawItem::set_shape(DrawItem::Rectangle),
+        DrawItem::Rectangle => DrawItem::set_shape(DrawItem::Animation),
+        DrawItem::Animation => DrawItem::set_shape(DrawItem::Circle),
+    };
 }

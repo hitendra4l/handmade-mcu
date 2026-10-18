@@ -7,6 +7,7 @@ mod constants;
 mod image_data;
 mod led;
 mod spi;
+mod sprite_data;
 mod systick;
 mod utils;
 

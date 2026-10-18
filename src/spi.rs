@@ -1,4 +1,4 @@
-use crate::{constants, image_data, systick, utils};
+use crate::{constants, image_data, sprite_data, systick, utils};
 use core::{
     ptr::addr_of_mut,
     sync::atomic::{AtomicU8, Ordering},
@@ -7,29 +7,41 @@ use core::{
 const LCD_WIDTH: u16 = 240;
 const LCD_HEIGHT: u16 = 320;
 
+const SPRITE_SIZE: usize = 16;
+const SPRITE_FRAME_BYTES: usize = SPRITE_SIZE * SPRITE_SIZE * 2;
+const SPRITE_FRAME_COUNT: usize = 20;
+// each sprite pixel is drawn as a SPRITE_SCALE x SPRITE_SCALE block
+const SPRITE_SCALE: usize = 8;
+const SPRITE_DRAW_SIZE: u16 = (SPRITE_SIZE * SPRITE_SCALE) as u16;
+// bytes for one sprite row once scaled up (SPRITE_SCALE screen rows)
+const SPRITE_SCALED_ROW_BYTES: usize = SPRITE_SCALE * SPRITE_DRAW_SIZE as usize * 2;
+
 const DMA_ONE_TIME_ROWS: u32 = 20;
 const DMA_ONE_TIME_DATA: u32 = 2 * 240 * DMA_ONE_TIME_ROWS;
 
-static mut SPI_DMA_BUFFER: [u8; DMA_ONE_TIME_DATA as usize] = [0u8; DMA_ONE_TIME_DATA as usize];
+static mut SPI_DMA_BUFFER: [u8; DMA_ONE_TIME_DATA as usize] = [255u8; DMA_ONE_TIME_DATA as usize];
 
 #[repr(u8)]
-enum DrawItem {
+#[derive(PartialEq)]
+pub enum DrawItem {
     Circle = 0,
     Image = 1,
     Rectangle = 2,
+    Animation = 3,
 }
 static CURRENT_SHAPE: AtomicU8 = AtomicU8::new(0);
 
 impl DrawItem {
-    fn set_shape(shape: DrawItem) {
+    pub fn set_shape(shape: DrawItem) {
         CURRENT_SHAPE.store(shape as u8, Ordering::Relaxed);
     }
 
-    fn get_shape() -> Self {
+    pub fn get_shape() -> Self {
         match CURRENT_SHAPE.load(Ordering::Relaxed) {
             0 => DrawItem::Circle,
             1 => DrawItem::Image,
             2 => DrawItem::Rectangle,
+            3 => DrawItem::Animation,
             _ => unreachable!("invalid DrawItem"),
         }
     }
@@ -66,7 +78,7 @@ pub fn init() {
     // Bit[0] : CPHA => 0
     // Bit[1] : CPOL => 0
     // Bit[2] : MSTR => 1 (board is in master mode)
-    // Bit[5:3] : BR => 000 => (f_PCLK/4 => 45MHz)
+    // Bit[5:3] : BR => 000 => (f_PCLK/2 => 45MHz)
     //     clock::configure_sysclk() has already run by this point, so:
     //     System Clock is PLL_P => 180MHz
     //     AHB Prescaler => 1
@@ -242,7 +254,12 @@ fn init_display() {
 
     lcd_write_command(LcdCommand::DISPLAYON, &[]);
 
-    draw(DrawItem::get_shape());
+    clear_screen();
+
+    loop {
+        let shape_to_draw = DrawItem::get_shape();
+        draw(shape_to_draw);
+    }
 }
 
 fn lcd_reset() {
@@ -321,28 +338,30 @@ fn set_address_window(x_start: u16, x_end: u16, y_start: u16, y_end: u16) {
 fn configure_dma2() {
     let rcc_ahb1enr_addr = (constants::RCC_BASE + constants::RCC_AHB1ENR_OFFSET) as *mut u32;
     let dma2_s3cr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3CR_OFFSET) as *mut u32;
-    let dma2_s3ndtr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3NDTR_OFFSET) as *mut u32;
     let dma2_s3par_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3PAR_OFFSET) as *mut u32;
 
     utils::register_set_bit(rcc_ahb1enr_addr, 22);
     utils::register_write_val(dma2_s3cr_addr, 0b0000_0110_0000_0011_0000_0100_0100_0000);
-    utils::register_write_val(dma2_s3ndtr_addr, DMA_ONE_TIME_DATA);
     utils::register_write_val(
         dma2_s3par_addr,
         constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET,
     );
 }
 
-fn dma2_send_data() {
+fn dma2_send_data(data_size: u32) {
     let dma2_s3m0ar_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3M0AR_OFFSET) as *mut u32;
+    let dma2_s3ndtr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3NDTR_OFFSET) as *mut u32;
     let dma2_lifcr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_LIFCR_OFFSET) as *mut u32;
     let dma2_hifcr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_HIFCR_OFFSET) as *mut u32;
     let dma2_s3cr_addr = (constants::DMA2_BASE_ADDR + constants::DMA_S3CR_OFFSET) as *mut u32;
     let dma2_lisr_adddr = (constants::DMA2_BASE_ADDR + constants::DMA_LISR_OFFSET) as *mut u32;
 
-    utils::register_write_val(dma2_s3m0ar_addr, addr_of_mut!(SPI_DMA_BUFFER) as u32);
-
     while utils::read_register_bit(dma2_s3cr_addr, 0) {}
+
+    // NDTR only auto-reloads in circular mode, so it must be reprogrammed
+    // before every transfer, and only while the stream is disabled
+    utils::register_write_val(dma2_s3ndtr_addr, data_size);
+    utils::register_write_val(dma2_s3m0ar_addr, addr_of_mut!(SPI_DMA_BUFFER) as u32);
 
     utils::register_write_val(dma2_lifcr_addr, 0b0000_1111_0111_1101_0000_1111_0111_1101);
     utils::register_write_val(dma2_hifcr_addr, 0b0000_1111_0111_1101_0000_1111_0111_1101);
@@ -397,7 +416,7 @@ fn send_shape_data(item: DrawItem) {
                     y += 1;
                 }
 
-                dma2_send_data();
+                dma2_send_data(DMA_ONE_TIME_DATA);
                 spi_wait_idle();
             }
         }
@@ -420,7 +439,7 @@ fn send_shape_data(item: DrawItem) {
                     }
                 }
 
-                dma2_send_data();
+                dma2_send_data(DMA_ONE_TIME_DATA);
                 spi_wait_idle();
             }
         }
@@ -448,27 +467,112 @@ fn send_shape_data(item: DrawItem) {
                     y += 1;
                 }
 
-                dma2_send_data();
+                dma2_send_data(DMA_ONE_TIME_DATA);
                 spi_wait_idle();
+            }
+        }
+        DrawItem::Animation => {
+            clear_screen();
+            let mut frame = 0;
+
+            while DrawItem::get_shape() == DrawItem::Animation {
+                draw_animation_frame(frame);
+                // without this the loop runs very fast
+                systick::delay_ms(100);
+                frame = (frame + 1) % SPRITE_FRAME_COUNT;
             }
         }
     }
 }
 
-pub fn draw_next_shape() {
-    let current_shape = DrawItem::get_shape();
-    match current_shape {
-        DrawItem::Circle => {
-            draw(DrawItem::Image);
-            DrawItem::set_shape(DrawItem::Image);
+pub fn draw_animation_frame(frame: usize) {
+    // 16 x 16 sprite frame, scaled up and centered
+    let x_start = (LCD_WIDTH - SPRITE_DRAW_SIZE) / 2;
+    let y_start = (LCD_HEIGHT - SPRITE_DRAW_SIZE) / 2;
+    set_address_window(
+        x_start,
+        x_start + SPRITE_DRAW_SIZE - 1,
+        y_start,
+        y_start + SPRITE_DRAW_SIZE - 1,
+    );
+
+    set_lcd_cs(PinStatus::Low);
+    set_lcd_dc(PinStatus::Low);
+
+    spi_wait_txe();
+
+    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
+    utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
+
+    spi_wait_idle();
+
+    set_lcd_dc(PinStatus::High);
+
+    let frame_start = frame * SPRITE_FRAME_BYTES;
+    let mut idx = 0;
+
+    for sprite_y in 0..SPRITE_SIZE {
+        // scaled frame doesn't fit in the DMA buffer, so flush it
+        // whenever the next scaled sprite row wouldn't fit
+        if idx + SPRITE_SCALED_ROW_BYTES > DMA_ONE_TIME_DATA as usize {
+            dma2_send_data(idx as u32);
+            spi_wait_idle();
+            idx = 0;
         }
-        DrawItem::Image => {
-            draw(DrawItem::Rectangle);
-            DrawItem::set_shape(DrawItem::Rectangle);
-        }
-        DrawItem::Rectangle => {
-            draw(DrawItem::Circle);
-            DrawItem::set_shape(DrawItem::Circle);
+
+        let row_start = frame_start + sprite_y * SPRITE_SIZE * 2;
+        for _ in 0..SPRITE_SCALE {
+            for sprite_x in 0..SPRITE_SIZE {
+                let high_byte = sprite_data::SPRITE_DATA[row_start + sprite_x * 2];
+                let low_byte = sprite_data::SPRITE_DATA[row_start + sprite_x * 2 + 1];
+
+                for _ in 0..SPRITE_SCALE {
+                    unsafe {
+                        SPI_DMA_BUFFER[idx] = high_byte;
+                        SPI_DMA_BUFFER[idx + 1] = low_byte;
+                    }
+                    idx += 2;
+                }
+            }
         }
     }
+
+    dma2_send_data(idx as u32);
+    spi_wait_idle();
+
+    set_lcd_cs(PinStatus::High);
+}
+
+fn clear_screen() {
+    set_address_window(0, LCD_WIDTH - 1, 0, LCD_HEIGHT - 1);
+
+    set_lcd_cs(PinStatus::Low);
+    set_lcd_dc(PinStatus::Low);
+
+    spi_wait_txe();
+
+    let spi_dr_addr = (constants::SPI1_BASE_ADDR + constants::SPI_DR_OFFSET) as *mut u8;
+    utils::register_write_val_u8(spi_dr_addr, LcdCommand::RAMWR as u8);
+
+    spi_wait_idle();
+
+    set_lcd_dc(PinStatus::High);
+
+    for _ in 0..16 {
+        let mut idx = 0;
+        for _ in 0..DMA_ONE_TIME_ROWS {
+            for _ in 0..LCD_WIDTH as i32 {
+                unsafe {
+                    SPI_DMA_BUFFER[idx] = 0u8;
+                    SPI_DMA_BUFFER[idx + 1] = 0u8;
+                }
+                idx += 2;
+            }
+        }
+
+        dma2_send_data(DMA_ONE_TIME_DATA);
+        spi_wait_idle();
+    }
+
+    set_lcd_cs(PinStatus::High);
 }
